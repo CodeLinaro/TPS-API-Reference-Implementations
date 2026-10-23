@@ -5,7 +5,6 @@
 resolver = "2"
 members = [
     "tps_minicbor",
-    "tps_cddl",
     "tps_client_common",
     "tps_client_api",
     "tps_client_c",
