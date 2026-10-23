@@ -11,7 +11,8 @@ members = [
     "tps_connector",
     "tps_error",
     "rot13_connector",
-    "rot13_service"
+    "rot13_service",
+    "tps_cose"
 ]
 # tock/ is its own, isolated Cargo workspace (see tock/Cargo.toml). Its apps path-depend
 # back into this root workspace's crates (tps_client_api, tps_client_common, ...), and
