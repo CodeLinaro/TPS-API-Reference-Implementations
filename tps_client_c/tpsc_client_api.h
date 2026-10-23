@@ -338,36 +338,6 @@ typedef struct {
 } TPSC_Session;
 
 /**
- * Connection information used to establish a connection to a Secure Component.
- */
-typedef enum {
-    /**
-     * No additional authorization data is provided; the callee ignores the other variants.
-     */
-    TPSC_NoConnectionData,
-    /**
-     * A Unix group ID authorizing the connection (spec §4.4.2, Table 4-1).
-     */
-    TPSC_GID,
-    /**
-     * An implementation-defined value understood by the callee.
-     */
-    TPSC_Proprietary,
-} TPSC_ConnectionData_Tag;
-
-typedef struct {
-    TPSC_ConnectionData_Tag tag;
-    union {
-        struct {
-            uint32_t gid;
-        };
-        struct {
-            const void *proprietary;
-        };
-    };
-} TPSC_ConnectionData;
-
-/**
  * TPSC_ServiceVersion defines the version of a TPS Service following semantic versioning rules.
  */
 typedef struct {
@@ -507,6 +477,36 @@ typedef struct {
     TPSC_ServiceVersion service_version;
 } TPSC_ServiceIdentifier;
 
+/**
+ * Connection information used to establish a connection to a Secure Component.
+ */
+typedef enum {
+    /**
+     * No additional authorization data is provided; the callee ignores the other variants.
+     */
+    TPSC_NoConnectionData,
+    /**
+     * A Unix group ID authorizing the connection (spec §4.4.2, Table 4-1).
+     */
+    TPSC_GID,
+    /**
+     * An implementation-defined value understood by the callee.
+     */
+    TPSC_Proprietary,
+} TPSC_ConnectionData_Tag;
+
+typedef struct {
+    TPSC_ConnectionData_Tag tag;
+    union {
+        struct {
+            uint32_t gid;
+        };
+        struct {
+            const void *proprietary;
+        };
+    };
+} TPSC_ConnectionData;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -516,30 +516,23 @@ extern "C" {
  * invocation operation. As this is a synchronous API, this function must be called from a
  * thread other than the one executing the TPSC_SessionOpen or TPSC_Transaction function.
  *
- * **NB:** Cancellation not supported in first release.
+ * A NULL `transaction` is a capability query per spec §4.5.2: it returns
+ * `TPSC_ERROR_CANCEL` if this implementation supports cancellation, or
+ * `TPSC_ERROR_NOT_SUPPORTED` otherwise (never `TPSC_ERROR_NULL_POINTER`, which the Return-list
+ * bullet in §4.5.2 also names for this input - a spec self-contradiction the human ruled
+ * should be resolved in favor of the capability-query reading, with the spec to be amended).
+ * This reference implementation is single-threaded and synchronous throughout, so it never
+ * supports cancellation and always returns `TPSC_ERROR_NOT_SUPPORTED` for this query.
  *
  * # Safety
  *
  * This function assumes that the caller ensures the following invariants are maintained:
  *
- * - `transaction` is allocated, correctly aligned and initialized.
+ * - `transaction` is allocated, correctly aligned and initialized (i.e. previously passed to a
+ *   successful call to [`TPSC_InitializeTransaction`]).
  *
  */
 uint32_t TPSC_CancelTransaction(TPSC_MessageBuffer *transaction);
-
-/**
- * This function clears the data in a TPSC_Transaction instance.
- * Callers may wish to clear the contents of a TPSC_Transaction for several reasons:
- *
- * - To ensure that the transaction is cleared to a known state before it is re-used.
- * - To ensure that sensitive information is cleared from memory as soon as it is no-longer needed.
- * - To ensure that information does not remain in memory after the transaction has been finalized.
- *
- * # Safety
- *
- * - `transaction` is allocated, properly aligned and initialized.
- */
-uint32_t TPSC_ClearTransaction(TPSC_MessageBuffer *transaction);
 
 /**
  * The function closes a session that has been opened with a TPS Service.
@@ -548,9 +541,37 @@ uint32_t TPSC_ClearTransaction(TPSC_MessageBuffer *transaction);
  *
  * This function assumes that the caller ensures the following invariants are maintained:
  *
- * - `session` is allocated, properly aligned and initialized.
+ * - `session` is allocated, properly aligned and initialized — i.e. it was populated by a
+ *   successful call to [`TPSC_OpenSession`], not e.g. zeroed or otherwise constructed by hand.
+ *   `Session::service_id` internally holds a reference derived from the raw `service` pointer
+ *   that [`TPSC_OpenSession`] was called with, so a `session` not obtained that way causes
+ *   undefined behavior when dereferenced here, rather than a safe `TPSC_ERROR_*` return.
  */
 uint32_t TPSC_CloseSession(TPSC_Session *session);
+
+/**
+ * The function discovers all TPS Services available via the TPS Client API that match the selector
+ * method.
+ *
+ * # Safety
+ *
+ * This function assumes that the caller ensures the following invariants are maintained:
+ *
+ * - `service_selector` points to a properly allocated, aligned and initialized instance of
+ *   `ServiceSelector` which MUST NOT be moved during the call to `service_discovery`.
+ * - `no_of_services` points to a properly allocated, aligned and initialized usize which holds
+ *   the number of entries (not bytes!) allocated for `service_array` on entry, and receives the
+ *   number of entries actually written on a successful return.
+ * - `service_array` points to a properly allocated and aligned instance `no_of_services` instances
+ *   of `ServiceIdentifier`.
+ *
+ * Calls with NULL pointers and where `no_of_services` are zero are caught as errors, but it
+ * is not possible for the code to catch initialization and/or alignment errors, where
+ * initialization and/or alignment are required.
+ */
+uint32_t TPSC_DiscoverServices(const TPSC_ServiceSelector *service_selector,
+                               TPSC_c_size *no_of_services,
+                               TPSC_ServiceIdentifier *service_array);
 
 /**
  * The function sends a request message and receives a response message within the specified
@@ -560,8 +581,18 @@ uint32_t TPSC_CloseSession(TPSC_Session *session);
  *
  * This function assumes that the caller ensures the following invariants are maintained:
  *
- * - `session` is allocated, correctly aligned and initialized.
- * - `transaction` is allocated, correctly aligned and initialized.
+ * - `session` is allocated, correctly aligned and initialized — i.e. it was populated by a
+ *   successful call to [`TPSC_OpenSession`], not e.g. zeroed or otherwise constructed by hand.
+ *   `Session::service_id` internally holds a reference derived from the raw `service` pointer
+ *   [`TPSC_OpenSession`] was called with, so a `session` not obtained that way causes undefined
+ *   behavior when dereferenced here, rather than a safe `TPSC_ERROR_*` return.
+ * - `send_buf` and `recv_buf` are allocated, correctly aligned and initialized (i.e. previously
+ *   passed to a successful call to [`TPSC_InitializeTransaction`]).
+ * - `recv_buf.maxsize` accurately reflects the real capacity of `recv_buf`'s backing allocation
+ *   as passed to [`TPSC_InitializeTransaction`]. This is not re-validated here: the true
+ *   allocation size is never recorded past that call, so an inflated `maxsize` causes the
+ *   connector behind this session to write past the real allocation. This is an accepted risk,
+ *   mitigated only by this documented caller obligation, not by any runtime check.
  */
 uint32_t TPSC_ExecuteTransaction(const TPSC_Session *session,
                                  const TPSC_MessageBuffer *send_buf,
@@ -571,12 +602,20 @@ uint32_t TPSC_ExecuteTransaction(const TPSC_Session *session,
  * The function finalizes a transaction structure that has been initialized and associated with
  * the session structure.
  *
+ * Returns `TPSC_ERROR_BAD_STATE` (spec §4.5.6) if `transaction`'s guard word does not match a
+ * freshly- or previously-initialized [`TPSC_InitializeTransaction`] call — i.e. it was not
+ * correctly initialized.
+ *
+ * **Programmer Error** (spec §4.5.6): it is an error to call this function on a `transaction`
+ * that is still owned by an ongoing [`TPSC_ExecuteTransaction`] call. This implementation does
+ * not detect that case (no cross-call ownership tracking exists), so violating it is undefined
+ * behavior rather than a checked error.
+ *
  * # Safety
  *
  * This function assumes that the caller ensures the following invariants are maintained:
  *
  * - `transaction` is allocated, properly aligned and initialized.
- * - `buf` is the address of an uninitialized u8 pointer
  */
 uint32_t TPSC_FinalizeTransaction(TPSC_MessageBuffer *transaction);
 
@@ -590,7 +629,11 @@ uint32_t TPSC_FinalizeTransaction(TPSC_MessageBuffer *transaction);
  *
  * - `transaction` is allocated and properly aligned. It is not expected to be initialized on
  *   calling.
- * - `buffer` is allocated and appropriately aligned. It MUST be at least as large as `maxsize`.
+ * - `buffer` is allocated and appropriately aligned. It MUST be at least as large as `maxsize` —
+ *   this is never re-validated once initialization completes, so passing an undersized `buffer`
+ *   here is what ultimately lets a later [`TPSC_ExecuteTransaction`] write past the real
+ *   allocation on the receive side; an accepted risk, mitigated only by this documented caller
+ *   obligation.
  */
 uint32_t TPSC_InitializeTransaction(TPSC_MessageBuffer *transaction,
                                     uint8_t *buffer,
@@ -604,7 +647,13 @@ uint32_t TPSC_InitializeTransaction(TPSC_MessageBuffer *transaction,
  *
  * This function assumes that the caller ensures the following invariants are maintained:
  *
- * - `service` is allocated, properly aligned and initialized.
+ * - `service` is allocated, properly aligned and initialized. **`service` must remain valid for
+ *   the entire lifetime of the resulting session** — through every subsequent call using
+ *   `session` (e.g. [`TPSC_ExecuteTransaction`], [`TPSC_CloseSession`]), not merely for the
+ *   duration of this call. `session`'s `service_id` field is a reference derived from `service`,
+ *   not a copy of it; letting `service` go out of scope (e.g. passing the address of a stack
+ *   local and returning) before `session` is closed causes undefined behavior on the next call
+ *   that dereferences `session`.
  * - `connection_data`, if not NULL, is properly aligned and initialized
  * - `session` is properly allocated and aligned. It is not expected to be initialized on entry.
  */
@@ -612,31 +661,6 @@ uint32_t TPSC_OpenSession(const TPSC_UUID *service,
                           uint32_t connection_method,
                           const TPSC_ConnectionData *connection_data,
                           TPSC_Session *session);
-
-/**
- * The function discovers all TPS Services available via the TPS Client API that match the selector
- * method.
- *
- * # Safety
- *
- * This function assumes that the caller ensures the following invariants are maintained:
- *
- * - `service_selector` points to a properly allocated, aligned and initialized instance of
- *   `ServiceSelector` which MUST NOT be moved during the call to `service_discovery`.
- * - `max_entries` points to a properly allocated, aligned and initialized usize which holds the
- *   number of entries (not bytes!) allocated for `service_array`
- * - `no_of_services` points to a properly allocated and aligned usize. The value, on calling the
- *   function is the number of elements in `service_array`.
- * - `service_array` points to a properly allocated and aligned instance `no_of_services` instances
- *   of `ServiceIdentifier`.
- *
- * Calls with NULL pointers and where `no_of_services` are zero are caught as errors, but it
- * is not possible for the code to catch initialization and/or alignment errors, where
- * initialization and/or alignment are required.
- */
-uint32_t TPSC_ServiceDiscovery(const TPSC_ServiceSelector *service_selector,
-                               TPSC_c_size *no_of_services,
-                               TPSC_ServiceIdentifier *service_array);
 
 #ifdef __cplusplus
 }  // extern "C"
